@@ -1,0 +1,5 @@
+# Trivial 3x3 puzzle (one rectangle = whole grid)
+3 3
+9 . .
+. . .
+. . .
