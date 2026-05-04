@@ -12,7 +12,7 @@ Solution    A complete or partial assignment of rectangles to clues.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Tuple, Union
 
 
 # ---------------------------------------------------------------------------
@@ -213,124 +213,202 @@ class Puzzle:
 # Solution
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Solution
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
 class Solution:
-    """A (possibly partial) assignment of rectangles to clues.
+    """Immutable assignment of rectangles to clues for a specific puzzle.
 
     Parameters
     ----------
-    placements : dict[Clue, Rectangle] | list[tuple[Clue, Rectangle]] | None
-        Initial assignments.  Pass nothing or ``None`` for an empty solution.
+    puzzle : Puzzle
+        Puzzle instance solved by this solution.
+    placements : mapping or iterable of tuple[Clue, Rectangle], optional
+        Assignments from clues to rectangles. Each rectangle is expected to
+        cover exactly one clue, match its clue value as area, and not overlap
+        any other rectangle.
+
+    Notes
+    -----
+    The class is immutable: operations that conceptually modify the solution
+    return a new `Solution` instance instead of mutating the current one.
     """
+
+    puzzle: Puzzle
+    placements: Tuple[Tuple[Clue, Rectangle], ...]
 
     def __init__(
         self,
+        puzzle: Puzzle,
         placements: Optional[
-            "Dict[Clue, Rectangle] | List[Tuple[Clue, Rectangle]]"
+            Union[
+                Mapping[Clue, Rectangle],
+                Iterable[Tuple[Clue, Rectangle]],
+            ]
         ] = None,
     ) -> None:
+        object.__setattr__(self, "puzzle", puzzle)
+
         if placements is None:
-            self._map: Dict[Clue, Rectangle] = {}
-        elif isinstance(placements, dict):
-            self._map = dict(placements)
+            normalized: Tuple[Tuple[Clue, Rectangle], ...] = ()
+        elif isinstance(placements, Mapping):
+            normalized = tuple(placements.items())
         else:
-            self._map = dict(placements)
+            normalized = tuple(placements)
 
-    # --- dict-like interface ----------------------------------------------
+        object.__setattr__(self, "placements", normalized)
 
-    def assign(self, clue: Clue, rect: Rectangle) -> None:
-        """Add or overwrite the rectangle for *clue*."""
-        self._map[clue] = rect
+    # --- dict-like read interface -----------------------------------------
 
-    def unassign(self, clue: Clue) -> None:
-        """Remove the assignment for *clue* (no-op if absent)."""
-        self._map.pop(clue, None)
+    @property
+    def assignment_map(self) -> Dict[Clue, Rectangle]:
+        """Return the assignments as a dictionary.
+
+        A new dictionary is returned to preserve the immutability of the
+        `Solution` object.
+        """
+        return dict(self.placements)
 
     def get(self, clue: Clue) -> Optional[Rectangle]:
         """Return the rectangle assigned to *clue*, or None."""
-        return self._map.get(clue)
+        return self.assignment_map.get(clue)
 
     def __contains__(self, clue: object) -> bool:
-        return clue in self._map
+        return clue in self.assignment_map
 
     def __len__(self) -> int:
-        return len(self._map)
+        return len(self.placements)
 
-    def items(self):
-        return self._map.items()
+    def items(self) -> Tuple[Tuple[Clue, Rectangle], ...]:
+        """Return the placement pairs in their stored order."""
+        return self.placements
 
     def copy(self) -> "Solution":
-        return Solution(dict(self._map))
+        """Return a logically equivalent solution.
+
+        Since the class is immutable, returning a new instance is mostly useful
+        for API symmetry with older mutable versions.
+        """
+        return Solution(self.puzzle, self.placements)
+
+    # --- immutable update helpers -----------------------------------------
+
+    def with_assignment(self, clue: Clue, rect: Rectangle) -> "Solution":
+        """Return a new solution with *clue* assigned to *rect*.
+
+        If the clue was already assigned, its previous rectangle is replaced.
+        """
+        updated = [
+            (current_clue, current_rect)
+            for current_clue, current_rect in self.placements
+            if current_clue != clue
+        ]
+        updated.append((clue, rect))
+        return Solution(self.puzzle, updated)
+
+    def without_assignment(self, clue: Clue) -> "Solution":
+        """Return a new solution without the assignment for *clue*."""
+        updated = [
+            (current_clue, current_rect)
+            for current_clue, current_rect in self.placements
+            if current_clue != clue
+        ]
+        return Solution(self.puzzle, updated)
 
     # --- validation -------------------------------------------------------
 
-    def is_complete(self, puzzle: Puzzle) -> bool:
-        """True iff every clue in *puzzle* has been assigned a rectangle."""
-        return len(self._map) == len(puzzle.clues) and all(
-            c in self._map for c in puzzle.clues
-        )
+    def is_complete(self) -> bool:
+        """True iff every clue in the puzzle has exactly one rectangle."""
+        assignment = self.assignment_map
 
-    def is_valid(self, puzzle: Puzzle) -> bool:
-        """True iff this solution is complete and forms a valid partition.
-
-        Checks:
-        1. Every clue has a rectangle.
-        2. Each rectangle's area equals its clue's value.
-        3. Each rectangle contains exactly its own clue (no foreign clue inside).
-        4. No two rectangles overlap.
-        5. Every cell of the grid is covered.
-        """
-        if not self.is_complete(puzzle):
+        if len(assignment) != len(self.placements):
             return False
 
-        rects = list(self._map.values())
+        return (
+            len(assignment) == len(self.puzzle.clues)
+            and all(clue in assignment for clue in self.puzzle.clues)
+        )
 
-        # (2) area & (3) clue containment
-        for clue, rect in self._map.items():
+    def is_valid(self) -> bool:
+        """True iff this solution forms a valid Shikaku partition.
+
+        Checks:
+        1. Every clue has exactly one rectangle.
+        2. Each rectangle fits inside the puzzle grid.
+        3. Each rectangle's area equals its clue's value.
+        4. Each rectangle contains its own clue.
+        5. Each rectangle contains no foreign clue.
+        6. No two rectangles overlap.
+        7. Every cell of the grid is covered.
+        """
+        if not self.is_complete():
+            return False
+
+        assignment = self.assignment_map
+        rects = list(assignment.values())
+
+        # (2), (3), (4), (5): local rectangle validity
+        for clue, rect in assignment.items():
+            if not self.puzzle.in_bounds(rect.r0, rect.c0, rect.r1, rect.c1):
+                return False
+
             if rect.area != clue.value:
                 return False
+
             if not rect.contains(clue.row, clue.col):
                 return False
-            for other in puzzle.clues:
-                if other is not clue and rect.contains(other.row, other.col):
+
+            for other in self.puzzle.clues:
+                if other != clue and rect.contains(other.row, other.col):
                     return False
 
-        # (4) pairwise non-overlap
+        # (6): pairwise non-overlap
         for i in range(len(rects)):
             for j in range(i + 1, len(rects)):
                 if rects[i].overlaps(rects[j]):
                     return False
 
-        # (5) full coverage
+        # (7): full grid coverage
         covered = set()
         for rect in rects:
             covered.update(rect.cells())
+
         expected = {
             (r, c)
-            for r in range(puzzle.rows)
-            for c in range(puzzle.cols)
+            for r in range(self.puzzle.rows)
+            for c in range(self.puzzle.cols)
         }
+
         return covered == expected
 
     # --- display ----------------------------------------------------------
 
-    def label_grid(self, puzzle: Puzzle) -> List[List[Optional[int]]]:
-        """Return a rows×cols grid where each cell holds a 1-based rectangle
-        index (ordered by ``puzzle.clues``) or None if uncovered."""
+    def label_grid(self) -> List[List[Optional[int]]]:
+        """Return a rows×cols grid with one 1-based label per rectangle.
+
+        Cells not covered by any current placement are returned as None.
+        """
         grid: List[List[Optional[int]]] = [
-            [None] * puzzle.cols for _ in range(puzzle.rows)
+            [None] * self.puzzle.cols for _ in range(self.puzzle.rows)
         ]
-        for idx, clue in enumerate(puzzle.clues, start=1):
-            rect = self._map.get(clue)
-            if rect is not None:
-                for r, c in rect.cells():
+
+        for idx, (_, rect) in enumerate(self.placements, start=1):
+            for r, c in rect.cells():
+                if 0 <= r < self.puzzle.rows and 0 <= c < self.puzzle.cols:
                     grid[r][c] = idx
+
         return grid
 
     def __str__(self) -> str:
-        lines = [f"Solution ({len(self._map)} rectangles):"]
-        for clue, rect in self._map.items():
+        lines = [f"Solution ({len(self.placements)} rectangles):"]
+        for clue, rect in self.placements:
             lines.append(f"  {clue}  →  {rect}")
         return "\n".join(lines)
 
     def __repr__(self) -> str:
-        return f"Solution({len(self._map)} placements)"
+        return (
+            f"Solution({self.puzzle.rows}×{self.puzzle.cols}, "
+            f"{len(self.placements)} placements)"
+        )
